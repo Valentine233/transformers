@@ -2483,3 +2483,93 @@ class OffloadedStaticCache(StaticCache):
 
         self._device_key_cache[layer_idx & 1].copy_(self.key_cache[layer_idx], non_blocking=True)
         self._device_value_cache[layer_idx & 1].copy_(self.value_cache[layer_idx], non_blocking=True)
+
+class PagedAttentionCache(Cache):
+    def __init__(
+        self, config, max_batch_size, max_cache_len, device, dtype, layer_device_map, n_pages=None, page_size=128
+    ):
+        super().__init__()
+        self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
+        self.paged_attentions = []
+        self.key_cache = []
+        self.value_cache = []
+        self.page_size = page_size
+        batch_size = max_batch_size
+        self.max_batch_size = max_batch_size
+        if n_pages is not None:
+            self.n_pages = n_pages
+        else:
+            self.n_pages = (max_cache_len + page_size - 1) // page_size * batch_size
+        KV_H = config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.num_attention_heads
+        QK_D = config.hidden_size // config.num_attention_heads
+        V_D = QK_D
+        from torch.nn.attention.experimental._paged_attention import PagedAttention
+        from torch.nn.attention.flex_attention import create_block_mask, noop_mask
+
+        for i in range(config.num_hidden_layers):
+            max_cached_seq_len = self.n_pages * self.page_size
+            self.paged_attentions.append(PagedAttention(self.n_pages, self.page_size, batch_size, device=device))
+            self.key_cache.append(torch.zeros(1, KV_H, max_cached_seq_len, QK_D, device=device, dtype=dtype))
+            self.value_cache.append(torch.zeros(1, KV_H, max_cached_seq_len, V_D, device=device, dtype=dtype))
+            self.batch_reserve(self.paged_attentions[i], torch.tensor([max_cache_len for _ in range(batch_size)]))
+        self.batch_size = batch_size
+        self.max_cache_len = max_cache_len
+        block_mask = create_block_mask(noop_mask, batch_size, 1, 1, max_cache_len, device=device, BLOCK_SIZE=page_size)
+        self.block_mask = self.paged_attentions[0].convert_logical_block_mask(block_mask)
+
+        self.score_mods = []
+        self.score_mods.append(None)
+        self.score_mods.append(None)
+        def causal_mask(b, h, q, kv):
+            return q >= kv
+
+        self.mask_func_for_first_token = causal_mask
+
+    def reset(self) -> None:
+        """Resets the cache values while preserving the objects."""
+
+        self._seen_tokens = 0
+
+        # Zero out cache.
+        for layer_idx in range(len(self.key_cache)):
+            # In-place ops prevent breaking the static address.
+            self.key_cache[layer_idx].zero_()
+            self.value_cache[layer_idx].zero_()
+
+    def batch_reserve(self, paged_attention, target_seq_len):
+        (B,) = target_seq_len.shape
+        for b in range(B):
+            paged_attention.reserve(
+                torch.tensor(b),
+                target_seq_len[b],
+            )
+
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        # update seen tokens
+        if layer_idx == 0:
+            self._seen_tokens += key_states.shape[-2]
+        KV_B, KV_H, KV_S, QK_D = key_states.shape
+        device = key_states.device
+        batch_idx = torch.arange(KV_B, device=device, dtype=torch.int32)
+
+        self.paged_attentions[layer_idx].assign(
+            batch_idx,
+            cache_kwargs["cache_position"].unsqueeze(0).expand([KV_B, KV_S]),
+            key_states,
+            value_states,
+            self.key_cache[layer_idx],
+            self.value_cache[layer_idx],
+        )
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
+        return self._seen_tokens if layer_idx == 0 else self._seen_tokens - 1
+
+    def reorder_cache(self, beam_idx):
+        for layer_idx in range(len(self.paged_attentions)):
+            if self.key_cache[layer_idx] != []:
+                page_table = self.paged_attentions[layer_idx].page_table.clone()
+                for batch_idx, target_batch_idx in enumerate(beam_idx.tolist()):
+                    page_table[batch_idx] = self.paged_attentions[layer_idx].page_table[target_batch_idx]
+                self.paged_attentions[layer_idx].page_table = page_table

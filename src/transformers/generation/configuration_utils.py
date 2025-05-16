@@ -56,6 +56,7 @@ if is_torch_available():
         MambaCache,
         OffloadedHybridCache,
         OffloadedStaticCache,
+        PagedAttentionCache,
         QuantizedCacheConfig,
         QuantoQuantizedCache,
         SlidingWindowCache,
@@ -75,6 +76,7 @@ if is_torch_available():
         "offloaded_hybrid": OffloadedHybridCache,
         "offloaded_hybrid_chunked": OffloadedHybridCache,
         "mamba": MambaCache,
+        "paged": PagedAttentionCache,
     }
     QUANT_BACKEND_CLASSES_MAPPING = {"quanto": QuantoQuantizedCache, "HQQ": HQQQuantizedCache}
     ALL_CACHE_IMPLEMENTATIONS = (

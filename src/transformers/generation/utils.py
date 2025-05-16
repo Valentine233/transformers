@@ -1860,6 +1860,11 @@ class GenerationMixin:
                 "device": device,
                 "layer_device_map": layer_device_map,
             }
+            if cache_implementation == "paged":
+                if hasattr(self.config, "n_pages"):
+                    cache_kwargs["n_pages"] = self.config.n_pages
+                if hasattr(self.config, "page_size"):
+                    cache_kwargs["page_size"] = self.config.page_size
             self._cache = cache_cls(**cache_kwargs)
             if requires_cross_attention_cache:
                 encoder_kwargs = cache_kwargs.copy()
