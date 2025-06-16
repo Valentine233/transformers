@@ -16,6 +16,7 @@
 import copy
 import inspect
 import os
+import time
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
@@ -2492,7 +2493,7 @@ class GenerationMixin:
             )
 
             # 12. run sample (it degenerates to greedy search when `generation_config.do_sample=False`)
-            result = self._sample(
+            result, latency_list = self._sample(
                 input_ids,
                 logits_processor=prepared_logits_processor,
                 stopping_criteria=prepared_stopping_criteria,
@@ -2627,7 +2628,7 @@ class GenerationMixin:
             and getattr(result.past_key_values, "to_legacy_cache") is not None
         ):
             result.past_key_values = result.past_key_values.to_legacy_cache()
-        return result
+        return result, latency_list
 
     def _has_unfinished_sequences(self, this_peer_finished: bool, synced_gpus: bool, device: torch.device) -> bool:
         """
@@ -3402,6 +3403,7 @@ class GenerationMixin:
             `model.config.is_encoder_decoder=True`.
         """
         # init values
+        latency_list = []
         pad_token_id = generation_config._pad_token_tensor
         output_attentions = generation_config.output_attentions
         output_hidden_states = generation_config.output_hidden_states
@@ -3444,6 +3446,7 @@ class GenerationMixin:
             is_prefill = True
 
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
+            tic = time.time()
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
@@ -3517,6 +3520,7 @@ class GenerationMixin:
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
             del outputs
+            latency_list.append(time.time() - tic)
 
         if streamer is not None:
             streamer.end()
@@ -3544,7 +3548,7 @@ class GenerationMixin:
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            return input_ids
+            return input_ids, latency_list
 
     # Auxiliary functions for beam search
     def _temporary_reorder_cache(self, past_key_values, beam_idx):
