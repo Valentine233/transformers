@@ -477,9 +477,9 @@ class LlamaPagedAttention(LlamaAttention):
                 key_states,
                 value_states,
                 enable_gqa=True if self.num_key_value_groups != 1 else False,
-                block_mask=past_key_value.block_mask,
+                block_mask=kwargs['block_mask'],
                 return_lse=output_attentions,
-                kernel_options={"SKIP_MASK_SCORE": True},
+                # kernel_options={"SKIP_MASK_SCORE": True},
             )
         attn_weights = None
         if output_attentions:
