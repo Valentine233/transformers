@@ -1041,7 +1041,23 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        # Do padding here using strategy of deepspeed at 
+        # https://github.com/deepspeedai/DeepSpeed/blob/v0.17.4/deepspeed/module_inject/tp_shard.py#L58.
+        import os
+        world_size = int(os.environ.get("WORLD_SIZE"))
+        input = hidden_states[:, slice_indices, :]
+        last_dim_size = input.shape[-1]
+        tp_grain_size = 64
+        grain_size = last_dim_size // tp_grain_size
+        shard_size = math.ceil(grain_size / world_size) * tp_grain_size
+        expected_size = shard_size * world_size
+        if expected_size > last_dim_size:
+            padding_size = expected_size - last_dim_size
+            input = torch.nn.functional.pad(input, (0, padding_size))
+
+
+        logits = self.lm_head(input)
 
         loss = None
         if labels is not None:
