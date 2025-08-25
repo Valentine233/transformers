@@ -364,7 +364,10 @@ class DynamicCache(Cache):
         self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
+        def causal_mask(b, h, q, kv):
+            return q >= kv
 
+        self.mask_func_for_first_token = causal_mask
         # `_distributed_cache_data` was originally added for compatibility with `torch.distributed` (DDP). See #36121
         # and #36373 for more information. In a nutshell, it is `map(gather_map, zip(*caches))`, i.e. each item in the
         # iterable contains the key and value states for a layer gathered across replicas by torch.distributed
@@ -2512,11 +2515,22 @@ class PagedAttentionCache(Cache):
             self.key_cache.append(torch.zeros(1, KV_H, max_cached_seq_len, QK_D, device=device, dtype=dtype))
             self.value_cache.append(torch.zeros(1, KV_H, max_cached_seq_len, V_D, device=device, dtype=dtype))
             self.batch_reserve(self.paged_attentions[i], torch.tensor([max_cache_len for _ in range(batch_size)]))
-        self.batch_size = batch_size
-        self.max_cache_len = max_cache_len
-        block_mask = create_block_mask(noop_mask, batch_size, 1, 1, max_cache_len, device=device, BLOCK_SIZE=page_size)
-        self.block_mask = self.paged_attentions[0].convert_logical_block_mask(block_mask)
 
+        def generate_causal_offset(offset: torch.Tensor):
+            def causal_offset_mask(b, h, q_idx, kv_idx):
+                return (offset + q_idx) >= kv_idx
+
+            return causal_offset_mask
+
+        self.batch_size = batch_size
+        self.max_cache_len = max_cache_len + 1
+        self.block_masks = []
+        for i in range(self.max_cache_len):
+            mod = generate_causal_offset(
+                torch.tensor(i, device=device, dtype=torch.int32)
+            )
+            block_mask = create_block_mask(mod, batch_size, 1, 1, self.max_cache_len, device=device, BLOCK_SIZE=page_size)
+            self.block_masks.append(self.paged_attentions[0].convert_logical_block_mask(block_mask))
         self.score_mods = []
         self.score_mods.append(None)
         self.score_mods.append(None)
