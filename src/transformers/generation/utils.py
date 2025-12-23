@@ -2628,7 +2628,15 @@ class GenerationMixin:
             and getattr(result.past_key_values, "to_legacy_cache") is not None
         ):
             result.past_key_values = result.past_key_values.to_legacy_cache()
-        return result, latency_list
+        no_token_latency = (
+            self.config.no_token_latency
+            if hasattr(self.config, "no_token_latency")
+            else False
+        )
+        if no_token_latency:
+            return result
+        else:
+            return result, latency_list
 
     def _has_unfinished_sequences(self, this_peer_finished: bool, synced_gpus: bool, device: torch.device) -> bool:
         """
